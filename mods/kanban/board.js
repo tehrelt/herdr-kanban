@@ -1,6 +1,7 @@
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex, Input, Scrollbar } from "gpui-base";
-import { COLUMNS, PRIORITIES } from "./parser.js";
+import { COLUMNS, PRIORITIES, isEpicFilename } from "./parser.js";
+import { filterRecentForMachine, joinPath, parentDir } from "./paths.js";
 import {
   alpha,
   badge,
@@ -63,14 +64,22 @@ export function renderToolbar(view, t) {
             .text_size(11.5)
             .text_color(view.backlogDir ? t.muted : t.accent)
             .cursor_pointer()
-            .tooltip(view.backlogDir ? `${view.backlogDir} (нажмите, чтобы сменить)` : "Выбрать папку backlog")
+            .tooltip(
+              view.backlogDir
+                ? `${view.on ? `[${view.on}] ` : ""}${view.backlogDir} (нажмите, чтобы сменить)`
+                : view.on
+                  ? `Выбрать папку backlog на ${view.on}`
+                  : "Выбрать папку backlog",
+            )
             .hover((s) => s.bg(t.hover).text_color(t.foreground))
             .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
             .on_click((_e, cx) => view.chooseFolder(cx))
             .child(svg("mods/kanban/icons/folder.svg").size(12).flex_none())
             .child(div().max_w(180).truncate().child(shortFolderLabel(view.backlogDir))),
         )
-        .when(view.readOnly, (el) => el.child(badge("Только чтение", t.working, alpha(t.working, "20"))))
+        .when(view.readOnly, (el) =>
+          el.child(badge(view.on ? `${view.on} · чтение` : "Только чтение", t.working, alpha(t.working, "20"))),
+        )
         .when(totalEpics > 0, (el) =>
           el.child(
             h_flex()
@@ -340,7 +349,7 @@ export function renderLoadingState(t) {
 }
 
 export function renderEmptyState(view, t) {
-  const recent = view.recentFolders ?? [];
+  const recent = filterRecentForMachine(view.recentFolders, view.on);
   return v_flex()
     .flex_1()
     .h_full()
@@ -365,10 +374,15 @@ export function renderEmptyState(view, t) {
             .child(svg("mods/kanban/icons/kanban.svg").size(20).text_color(t.accent))
             .child(
               div()
+                .flex_1()
+                .min_w(0)
                 .text_size(15)
                 .font_semibold()
                 .text_color(t.foreground)
                 .child(view.backlogDir ? "В папке нет эпиков" : "Папка backlog не выбрана"),
+            )
+            .when(Boolean(view.on), (el) =>
+              el.child(badge(view.on, t.accent, alpha(t.accent, "20"))),
             ),
         )
         .child(
@@ -380,8 +394,10 @@ export function renderEmptyState(view, t) {
               view.error
                 ? view.error
                 : view.backlogDir
-                  ? `В ${view.backlogDir} пока нет .md файлов эпиков. Создайте первый эпик или выберите другую папку.`
-                  : "Плагин автоматически ищет папку backlog/ в активном space. Выберите папку с .md задачами вручную или откройте недавний проект.",
+                  ? `В ${view.backlogDir} пока нет .md файлов эпиков. ${view.readOnly ? "Выберите другую папку." : "Создайте первый эпик или выберите другую папку."}`
+                  : view.on
+                    ? `Плагин автоматически ищет папку backlog/ на ${view.on}. Укажите путь или выберите папку на удалённой машине.`
+                    : "Плагин автоматически ищет папку backlog/ в активном space. Выберите папку с .md задачами вручную или откройте недавний проект.",
             ),
         )
         .child(
@@ -404,7 +420,7 @@ export function renderEmptyState(view, t) {
                 .hover((s) => s.opacity(0.88))
                 .on_click((_e, cx) => view.chooseFolder(cx))
                 .child(svg("mods/kanban/icons/folder.svg").size(14))
-                .child("Выбрать папку…"),
+                .child(view.on ? `Выбрать папку на ${view.on}…` : "Выбрать папку…"),
             )
             .when(Boolean(view.backlogDir) && !view.readOnly, (el) =>
               el.child(
@@ -437,7 +453,7 @@ export function renderEmptyState(view, t) {
               .border_color(t.border)
               .child(div().text_size(11).font_medium().text_color(t.dim).child("Недавние папки"))
               .children(
-                recent.map((dir, idx) =>
+                recent.map((item, idx) =>
                   h_flex()
                     .id(`kb-recent-${idx}`)
                     .h(30)
@@ -447,9 +463,9 @@ export function renderEmptyState(view, t) {
                     .rounded(6)
                     .cursor_pointer()
                     .hover((s) => s.bg(t.hover))
-                    .on_click((_e, cx) => view.selectFolder(dir, cx))
+                    .on_click((_e, cx) => view.selectFolder(item.dir, cx))
                     .child(svg("mods/kanban/icons/folder.svg").size(13).flex_none().text_color(t.muted))
-                    .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).child(dir)),
+                    .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).child(item.dir)),
                 ),
               ),
           ),
@@ -934,6 +950,352 @@ export function renderContextMenu(view, t) {
           itemRow("kb-ctx-copy-path", "folder", "Копировать путь к .md", (cx) =>
             view.copyFilePath(menu.epic, cx),
           ),
+        ),
+    );
+}
+
+export function renderRemoteFolderPicker(view, t) {
+  const currentDir = view.remoteBrowseDir || "~";
+  const upDir = parentDir(currentDir);
+  const canGoUp = Boolean(upDir && upDir !== currentDir);
+  const dirs = view.remoteBrowseDirs ?? [];
+  const mdFiles = view.remoteBrowseMdFiles ?? [];
+  const epicCount = mdFiles.filter(isEpicFilename).length;
+  const recent = filterRecentForMachine(view.recentFolders, view.on);
+  const modalW = Math.min(560, Math.max(320, (view.size?.width ?? 800) - 48));
+  const modalH = Math.min(480, Math.max(280, (view.size?.height ?? 600) - 64));
+
+  return div()
+    .id("kb-remote-picker-backdrop")
+    .absolute()
+    .inset_0()
+    .flex()
+    .items_center()
+    .justify_center()
+    .bg(alpha(t.canvas ?? t.background, "cc"))
+    .on_mouse_down("left", (_e, cx) => {
+      cx.stop_propagation();
+      view.closeFolderPicker(cx);
+    })
+    .child(
+      v_flex()
+        .id("kb-remote-picker")
+        .w(modalW)
+        .h(modalH)
+        .rounded(12)
+        .border_1()
+        .border_color(t.border)
+        .bg(t.surface)
+        .overflow_hidden()
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .child(
+          h_flex()
+            .h(44)
+            .flex_none()
+            .px(14)
+            .gap(8)
+            .items_center()
+            .bg(t.chrome)
+            .border_b(1)
+            .border_color(t.border)
+            .child(svg("mods/kanban/icons/folder.svg").size(15).flex_none().text_color(t.accent))
+            .child(
+              div()
+                .flex_1()
+                .min_w(0)
+                .truncate()
+                .text_size(13.5)
+                .font_semibold()
+                .text_color(t.foreground)
+                .child(`Выбор папки на ${view.on || "удалённой машине"}`),
+            )
+            .child(
+              iconButton(
+                "kb-remote-close",
+                "x",
+                "Закрыть (Esc)",
+                (_e, cx) => view.closeFolderPicker(cx),
+                t,
+                { size: 24, iconSize: 13 },
+              ),
+            ),
+        )
+        .child(
+          v_flex()
+            .flex_none()
+            .p(12)
+            .gap(8)
+            .border_b(1)
+            .border_color(t.border)
+            .child(
+              h_flex()
+                .gap(6)
+                .items_center()
+                .child(
+                  h_flex()
+                    .id("kb-remote-path-box")
+                    .flex_1()
+                    .h(30)
+                    .px(9)
+                    .items_center()
+                    .rounded(6)
+                    .border_1()
+                    .border_color(view.remotePathFocused ? t.accent : t.input)
+                    .bg(t.background)
+                    .child(Input.new(view.remotePathInput).w_full().h_full().text_size(12.5).text_color(t.foreground)),
+                )
+                .child(
+                  h_flex()
+                    .id("kb-remote-go")
+                    .h(30)
+                    .px(12)
+                    .items_center()
+                    .rounded(6)
+                    .border_1()
+                    .border_color(t.border)
+                    .bg(t.raised)
+                    .text_size(12)
+                    .font_medium()
+                    .text_color(t.foreground)
+                    .cursor_pointer()
+                    .hover((s) => s.bg(t.hover))
+                    .on_click((_e, cx) => view.submitRemotePath(cx))
+                    .child("Перейти"),
+                ),
+            )
+            .child(
+              h_flex()
+                .gap(6)
+                .items_center()
+                .child(
+                  pillButton(
+                    "kb-remote-up",
+                    "Вверх",
+                    false,
+                    (_e, cx) => {
+                      if (canGoUp) view.browseRemoteDir(upDir, cx);
+                    },
+                    t,
+                    { icon: "arrow-left", height: 24, px: 8, textSize: 11.5 },
+                  ),
+                )
+                .child(
+                  div()
+                    .flex_1()
+                    .min_w(0)
+                    .truncate()
+                    .text_size(11.5)
+                    .text_color(t.muted)
+                    .child(currentDir),
+                )
+                .when(epicCount > 0, (el) =>
+                  el.child(badge(`Эпиков: ${epicCount}`, t.done, alpha(t.done, "22"))),
+                )
+                .child(
+                  iconButton(
+                    "kb-remote-refresh",
+                    "refresh",
+                    "Обновить список",
+                    (_e, cx) => view.browseRemoteDir(currentDir, cx),
+                    t,
+                    { size: 24, iconSize: 12 },
+                  ),
+                ),
+            )
+            .when(Boolean(view.remoteBrowseError), (el) =>
+              el.child(
+                div()
+                  .px(9)
+                  .py(6)
+                  .rounded(6)
+                  .bg(alpha(t.blocked ?? t.ansi1, "18"))
+                  .border_1()
+                  .border_color(alpha(t.blocked ?? t.ansi1, "55"))
+                  .text_size(11.5)
+                  .text_color(t.blocked ?? t.ansi1)
+                  .child(view.remoteBrowseError),
+              ),
+            ),
+        )
+        .child(
+          div()
+            .flex_1()
+            .min_h(0)
+            .relative()
+            .child(
+              div()
+                .id("kb-remote-dirs-scroll")
+                .absolute()
+                .inset_0()
+                .overflow_y_scroll()
+                .child(
+                  v_flex()
+                    .w_full()
+                    .p(8)
+                    .gap(2)
+                    .when(view.remoteBrowseLoading && dirs.length === 0, (el) =>
+                      el.child(
+                        h_flex()
+                          .p(12)
+                          .gap(8)
+                          .items_center()
+                          .child(svg("mods/kanban/icons/spinner.svg").size(14).text_color(t.accent).spin(900))
+                          .child(div().text_size(12).text_color(t.muted).child("Чтение папок…")),
+                      ),
+                    )
+                    .children(
+                      dirs.map((name, idx) => {
+                        const full = joinPath(currentDir, name);
+                        const isBacklog = name.toLowerCase() === "backlog" || name.toLowerCase() === ".backlog";
+                        return h_flex()
+                          .id(`kb-remote-dir-${idx}`)
+                          .h(30)
+                          .px(8)
+                          .gap(8)
+                          .items_center()
+                          .rounded(6)
+                          .cursor_pointer()
+                          .hover((s) => s.bg(t.hover))
+                          .on_click((_e, cx) => view.browseRemoteDir(full, cx))
+                          .child(
+                            svg("mods/kanban/icons/folder.svg")
+                              .size(13)
+                              .flex_none()
+                              .text_color(isBacklog ? t.accent : t.muted),
+                          )
+                          .child(
+                            div()
+                              .flex_1()
+                              .min_w(0)
+                              .truncate()
+                              .text_size(12.5)
+                              .when(isBacklog, (el) => el.font_semibold().text_color(t.accent))
+                              .when(!isBacklog, (el) => el.text_color(t.foreground))
+                              .child(name),
+                          )
+                          .when(isBacklog, (el) =>
+                            el.child(
+                              h_flex()
+                                .id(`kb-remote-pick-${idx}`)
+                                .h(22)
+                                .px(8)
+                                .items_center()
+                                .rounded(5)
+                                .bg(alpha(t.accent, "22"))
+                                .text_size(11)
+                                .font_medium()
+                                .text_color(t.accent)
+                                .cursor_pointer()
+                                .hover((s) => s.bg(alpha(t.accent, "38")))
+                                .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+                                .on_click((_e, cx) => {
+                                  cx.stop_propagation();
+                                  view.selectFolder(full, cx);
+                                })
+                                .child("Выбрать"),
+                            ),
+                          )
+                          .child(svg("mods/kanban/icons/chevron-right.svg").size(12).flex_none().text_color(t.dim));
+                      }),
+                    )
+                    .when(!view.remoteBrowseLoading && dirs.length === 0 && !view.remoteBrowseError, (el) =>
+                      el.child(
+                        div()
+                          .p(12)
+                          .text_size(12)
+                          .text_color(t.dim)
+                          .child(
+                            epicCount > 0
+                              ? `Подпапок нет · найдено эпиков: ${epicCount}`
+                              : "Подпапок нет",
+                          ),
+                      ),
+                    )
+                    .when(recent.length > 0, (el) =>
+                      el.child(
+                        v_flex()
+                          .mt(8)
+                          .pt(8)
+                          .gap(2)
+                          .border_t(1)
+                          .border_color(t.border)
+                          .child(div().px(8).py(2).text_size(11).font_medium().text_color(t.dim).child("Недавние на этой машине"))
+                          .children(
+                            recent.map((item, idx) =>
+                              h_flex()
+                                .id(`kb-remote-recent-${idx}`)
+                                .h(28)
+                                .px(8)
+                                .gap(8)
+                                .items_center()
+                                .rounded(6)
+                                .cursor_pointer()
+                                .hover((s) => s.bg(t.hover))
+                                .on_click((_e, cx) => view.selectFolder(item.dir, cx))
+                                .child(svg("mods/kanban/icons/folder.svg").size(12).flex_none().text_color(t.muted))
+                                .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(item.dir)),
+                            ),
+                          ),
+                      ),
+                    ),
+                ),
+            )
+            .child(Scrollbar.vertical("kb-remote-dirs-scroll").absolute().inset_0()),
+        )
+        .child(
+          h_flex()
+            .h(48)
+            .flex_none()
+            .px(12)
+            .gap(8)
+            .items_center()
+            .bg(t.chrome)
+            .border_t(1)
+            .border_color(t.border)
+            .child(
+              div()
+                .flex_1()
+                .min_w(0)
+                .truncate()
+                .text_size(11.5)
+                .text_color(t.dim)
+                .child(epicCount > 0 ? `Готово к открытию (${epicCount} эпиков)` : "Откройте папку или выберите текущую"),
+            )
+            .child(
+              h_flex()
+                .id("kb-remote-cancel")
+                .h(30)
+                .px(12)
+                .items_center()
+                .rounded(6)
+                .border_1()
+                .border_color(t.border)
+                .bg(t.raised)
+                .text_size(12)
+                .text_color(t.muted)
+                .cursor_pointer()
+                .hover((s) => s.bg(t.hover).text_color(t.foreground))
+                .on_click((_e, cx) => view.closeFolderPicker(cx))
+                .child("Отмена"),
+            )
+            .child(
+              h_flex()
+                .id("kb-remote-select")
+                .h(30)
+                .px(14)
+                .gap(6)
+                .items_center()
+                .rounded(6)
+                .bg(t.solid)
+                .text_size(12)
+                .font_medium()
+                .text_color(t.solid_foreground)
+                .cursor_pointer()
+                .hover((s) => s.opacity(0.88))
+                .on_click((_e, cx) => view.confirmRemoteFolder(currentDir, cx))
+                .child(svg("mods/kanban/icons/check.svg").size(12))
+                .child("Выбрать эту папку"),
+            ),
         ),
     );
 }

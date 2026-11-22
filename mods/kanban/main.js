@@ -8,6 +8,7 @@ import {
   terminals,
   exec,
   hc,
+  home,
   readTextFile,
   writeTextFile,
   watchFolder,
@@ -25,6 +26,15 @@ import {
   setShared,
   settings,
 } from "herdr";
+import {
+  normPath,
+  joinPath,
+  parentDir,
+  expandTilde,
+  parseRemoteDirOutput,
+  normalizeRecentEntries,
+  addRecentEntry,
+} from "./paths.js";
 import {
   isEpicFilename,
   isNumberedEpicFilename,
@@ -44,6 +54,7 @@ import {
   renderEmptyState,
   renderBoard,
   renderContextMenu,
+  renderRemoteFolderPicker,
 } from "./board.js";
 import { renderDetail } from "./detail.js";
 
@@ -52,25 +63,7 @@ const STORAGE_RECENT = "kanban.recent";
 const STORAGE_MODE = "kanban.mode";
 const STORAGE_AGENT = "kanban.agent";
 
-function normPath(p) {
-  if (!p || typeof p !== "string") return null;
-  return p.replace(/\\/g, "/").replace(/\/+$/, "") || "/";
-}
-
-function joinPath(dir, name) {
-  const base = normPath(dir);
-  if (!base) return name;
-  return base === "/" ? `/${name}` : `${base}/${name}`;
-}
-
-function parentDir(dir) {
-  const p = normPath(dir);
-  if (!p) return null;
-  const idx = p.lastIndexOf("/");
-  if (idx <= 0) return p;
-  if (idx === 2 && /^[A-Za-z]:/.test(p)) return p.slice(0, 3);
-  return p.slice(0, idx);
-}
+const remoteHomeCache = new Map();
 
 function readShared(key, fallback) {
   const val = shared(key);
@@ -86,8 +79,54 @@ function readShared(key, fallback) {
   }
 }
 
+async function getHomeDir(on) {
+  if (!on) return normPath(home());
+  if (remoteHomeCache.has(on)) return remoteHomeCache.get(on);
+
+  const tryPowerShell = async () => {
+    try {
+      const r = await exec(
+        "powershell",
+        ["-NoProfile", "-Command", "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $HOME"],
+        { on },
+      );
+      if (r.code === 0 && r.stdout.trim()) {
+        const resolved = normPath(r.stdout.trim());
+        if (resolved) remoteHomeCache.set(on, resolved);
+        return resolved;
+      }
+    } catch {}
+    return null;
+  };
+
+  try {
+    const r = await exec("sh", ["-c", 'printf "%s" "$HOME"'], { on });
+    if (r.code === 0 && r.stdout.trim()) {
+      const resolved = normPath(r.stdout.trim());
+      if (resolved) remoteHomeCache.set(on, resolved);
+      return resolved;
+    }
+  } catch (e) {
+    const msg = String(e);
+    if (msg.includes("program not found") || msg.includes("cannot start sh")) {
+      return tryPowerShell();
+    }
+  }
+  return null;
+}
+
+async function resolvePath(p, on) {
+  const clean = normPath(p);
+  if (!clean) return null;
+  if (clean === "~" || clean.startsWith("~/")) {
+    const h = await getHomeDir(on);
+    return expandTilde(clean, h);
+  }
+  return clean;
+}
+
 async function listMarkdownFiles(dir, on) {
-  const cleanDir = normPath(dir);
+  const cleanDir = await resolvePath(dir, on);
   if (!cleanDir) return null;
 
   const runPowerShell = async () => {
@@ -108,23 +147,83 @@ async function listMarkdownFiles(dir, on) {
   }
 
   const shScript =
-    'test -d "$1" || exit 2; for p in "$1"/*.md "$1"/*.MD; do [ -f "$p" ] || continue; printf "%s\\0" "${p##*/}"; done';
+    'd="$1"; test -d "$d" || exit 2; case "$d" in */) ;; *) d="$d/";; esac; for p in "${d}"*.md "${d}"*.MD; do [ -f "$p" ] || continue; printf "%s\\0" "${p##*/}"; done';
   try {
     const r = await exec("sh", ["-c", shScript, "kanban", cleanDir], { on });
     if (r.code !== 0) return null;
     return r.stdout.split("\0").filter(Boolean);
   } catch (e) {
-    if (on && String(e).includes("cannot start sh: program not found")) {
+    const msg = String(e);
+    if (on && (msg.includes("program not found") || msg.includes("cannot start sh") || /^[A-Za-z]:\//.test(cleanDir))) {
       return runPowerShell();
     }
     return null;
   }
 }
 
-async function gitTopLevel(cwd, on) {
-  if (!cwd) return null;
+async function listRemoteDirectory(dir, on) {
+  let targetDir = await resolvePath(dir, on);
+  if (!targetDir) {
+    targetDir = (await getHomeDir(on)) || "/";
+  }
+
+  const runPowerShell = async () => {
+    const escaped = targetDir.replace(/['‘’‚‛]/g, "$&$&");
+    const script =
+      "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); " +
+      "& { param($p) if ([string]::IsNullOrEmpty($p)) { $p = $HOME }; " +
+      "if (-not (Test-Path -LiteralPath $p -PathType Container)) { exit 2 }; " +
+      "$real = (Resolve-Path -LiteralPath $p).Path; " +
+      "$items = @(Get-ChildItem -LiteralPath $real -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne '.git' -and $_.Name -ne 'node_modules' }); " +
+      "$dirs = @($items | Where-Object { $_.PSIsContainer } | Select-Object -ExpandProperty Name); " +
+      "$mds = @($items | Where-Object { -not $_.PSIsContainer -and $_.Name -match '\\.md$' } | Select-Object -ExpandProperty Name); " +
+      "@{ dir = $real; dirs = $dirs; mdFiles = $mds } | ConvertTo-Json -Compress } " +
+      `'${escaped}'`;
+    const r = await exec("powershell", ["-NoProfile", "-Command", script], { on });
+    if (r.code !== 0) {
+      throw new Error(r.stderr?.trim() || `Папка не найдена: ${targetDir}`);
+    }
+    const parsed = JSON.parse(r.stdout || "{}");
+    const dirs = Array.isArray(parsed.dirs) ? parsed.dirs : parsed.dirs ? [parsed.dirs] : [];
+    const mdFiles = Array.isArray(parsed.mdFiles) ? parsed.mdFiles : parsed.mdFiles ? [parsed.mdFiles] : [];
+    const fields = ["DIR", parsed.dir || targetDir];
+    for (const d of dirs) fields.push("D", d);
+    for (const m of mdFiles) fields.push("M", m);
+    return parseRemoteDirOutput(fields.join("\0"), targetDir);
+  };
+
+  const shScript =
+    'd="$1"; [ -n "$d" ] || d="$HOME"; test -d "$d" || exit 2; ' +
+    'real=$(cd "$d" 2>/dev/null && pwd -P) || real="$d"; ' +
+    'printf "DIR\\0%s\\0" "$real"; ' +
+    'case "$real" in */) pfx="$real";; *) pfx="$real/";; esac; ' +
+    'for p in "${pfx}"* "${pfx}".[!.]* "${pfx}"..?*; do ' +
+    '[ -e "$p" ] || continue; name=${p##*/}; ' +
+    '[ "$name" = ".git" ] || [ "$name" = "node_modules" ] && continue; ' +
+    'if [ -d "$p" ]; then printf "D\\0%s\\0" "$name"; ' +
+    'elif [ -f "$p" ]; then case "$name" in *.md|*.MD) printf "M\\0%s\\0" "$name";; esac; fi; ' +
+    'done';
+
   try {
-    const r = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on });
+    const r = await exec("sh", ["-c", shScript, "kanban", targetDir], { on });
+    if (r.code !== 0) {
+      throw new Error(r.stderr?.trim() || `Папка не найдена: ${targetDir}`);
+    }
+    return parseRemoteDirOutput(r.stdout, targetDir);
+  } catch (e) {
+    const msg = String(e);
+    if (msg.includes("program not found") || msg.includes("cannot start sh") || /^[A-Za-z]:\//.test(targetDir)) {
+      return runPowerShell();
+    }
+    throw e;
+  }
+}
+
+async function gitTopLevel(cwd, on) {
+  const cleanCwd = await resolvePath(cwd, on);
+  if (!cleanCwd) return null;
+  try {
+    const r = await exec("git", ["rev-parse", "--show-toplevel"], { cwd: cleanCwd, on });
     if (r.code !== 0) return null;
     return normPath(r.stdout.trim());
   } catch {
@@ -180,8 +279,26 @@ export default class Kanban extends View {
     const savedFolders = readShared(STORAGE_FOLDERS, {});
     this.spaceFolders =
       savedFolders && typeof savedFolders === "object" && !Array.isArray(savedFolders) ? savedFolders : {};
-    const savedRecent = readShared(STORAGE_RECENT, []);
-    this.recentFolders = Array.isArray(savedRecent) ? savedRecent : [];
+    this.recentFolders = normalizeRecentEntries(readShared(STORAGE_RECENT, []));
+
+    this.folderPickerOpen = false;
+    this.remoteBrowseDir = null;
+    this.remoteBrowseDirs = [];
+    this.remoteBrowseMdFiles = [];
+    this.remoteBrowseLoading = false;
+    this.remoteBrowseError = null;
+    this.remoteBrowseSeq = 0;
+    this.remotePathFocused = false;
+    this.remotePathInput = InputState.new({ placeholder: "/path/to/project/backlog" });
+    this.remotePathInput.on("submit", (_e, cx) => this.submitRemotePath(cx));
+    this.remotePathInput.on("focus", (_e, cx) => {
+      this.remotePathFocused = true;
+      cx.notify();
+    });
+    this.remotePathInput.on("blur", (_e, cx) => {
+      this.remotePathFocused = false;
+      cx.notify();
+    });
 
     this.searchFocused = false;
     this.searchInput = InputState.new({ placeholder: "Поиск…" });
@@ -326,8 +443,8 @@ export default class Kanban extends View {
     const spaceTabIds = new Set((space?.tabs ?? []).map((t) => t.id));
     const paneCwd =
       (f?.pane ? allPanes.find((p) => p.pane === f.pane)?.cwd : null) ||
-      f?.cwd ||
-      (f?.tab ? allPanes.find((p) => p.tab === f.tab && p.cwd)?.cwd : null) ||
+      (f?.space === space?.id ? f?.cwd : null) ||
+      (f?.tab && spaceTabIds.has(f.tab) ? allPanes.find((p) => p.tab === f.tab && p.cwd)?.cwd : null) ||
       allPanes.find((p) => spaceTabIds.has(p.tab) && p.cwd)?.cwd ||
       space?.folder ||
       null;
@@ -339,7 +456,7 @@ export default class Kanban extends View {
     }
     const sharedRecent = shared(STORAGE_RECENT);
     if (Array.isArray(sharedRecent)) {
-      this.recentFolders = sharedRecent;
+      this.recentFolders = normalizeRecentEntries(sharedRecent);
     }
     const overrideFolder =
       this.overrideFolder && this.overrideFolder.spaceKey === spaceKey ? normPath(this.overrideFolder.dir) : null;
@@ -350,7 +467,8 @@ export default class Kanban extends View {
   }
 
   async detectBacklogDir(ctx) {
-    for (const explicitDir of [ctx.overrideFolder, ctx.propFolder, ctx.manualDir]) {
+    for (const rawExplicit of [ctx.overrideFolder, ctx.propFolder, ctx.manualDir]) {
+      const explicitDir = await resolvePath(rawExplicit, ctx.on);
       if (!explicitDir) continue;
       const files = await listMarkdownFiles(explicitDir, ctx.on);
       if (files !== null) {
@@ -368,21 +486,30 @@ export default class Kanban extends View {
       candidates.push({ dir: clean, root: normPath(root) || parentDir(clean), strict });
     };
 
-    const top = await gitTopLevel(ctx.paneCwd, ctx.on);
-    if (ctx.paneCwd) {
-      pushCandidate(joinPath(ctx.paneCwd, "backlog"), ctx.paneCwd, false);
-      pushCandidate(joinPath(ctx.paneCwd, "docs/backlog"), ctx.paneCwd, false);
-      pushCandidate(joinPath(ctx.paneCwd, ".backlog"), ctx.paneCwd, false);
+    const resolvedCwd = await resolvePath(ctx.paneCwd, ctx.on);
+    const top = await gitTopLevel(resolvedCwd, ctx.on);
+    if (resolvedCwd) {
+      pushCandidate(joinPath(resolvedCwd, "backlog"), resolvedCwd, false);
+      pushCandidate(joinPath(resolvedCwd, "docs/backlog"), resolvedCwd, false);
+      pushCandidate(joinPath(resolvedCwd, ".backlog"), resolvedCwd, false);
     }
-    if (top && top !== ctx.paneCwd) {
+    if (top && top !== resolvedCwd) {
       pushCandidate(joinPath(top, "backlog"), top, false);
       pushCandidate(joinPath(top, "docs/backlog"), top, false);
       pushCandidate(joinPath(top, ".backlog"), top, false);
     }
-    if (ctx.paneCwd) {
-      const lower = ctx.paneCwd.toLowerCase();
+    if (resolvedCwd) {
+      const lower = resolvedCwd.toLowerCase();
       const isBacklogDir = lower.endsWith("/backlog") || lower.endsWith("/.backlog");
-      pushCandidate(ctx.paneCwd, top || parentDir(ctx.paneCwd), !isBacklogDir);
+      pushCandidate(resolvedCwd, top || parentDir(resolvedCwd), !isBacklogDir);
+    }
+    if (!resolvedCwd) {
+      const homeDir = await getHomeDir(ctx.on);
+      if (homeDir) {
+        pushCandidate(joinPath(homeDir, "backlog"), homeDir, false);
+        pushCandidate(joinPath(homeDir, "docs/backlog"), homeDir, false);
+        pushCandidate(joinPath(homeDir, ".backlog"), homeDir, false);
+      }
     }
 
     for (const c of candidates) {
@@ -395,7 +522,7 @@ export default class Kanban extends View {
       }
     }
 
-    return { backlogDir: null, projectRoot: top || ctx.paneCwd, files: null };
+    return { backlogDir: null, projectRoot: top || resolvedCwd, files: null };
   }
 
   refresh(cx, force = false) {
@@ -408,6 +535,8 @@ export default class Kanban extends View {
       this.selectedEpicFile = null;
       this.selectedTaskLine = null;
       this.contextMenu = null;
+      this.folderPickerOpen = false;
+      this.remoteBrowseError = null;
       this.error = null;
       this.stopWatch();
       this.loadAgents(cx);
@@ -431,16 +560,20 @@ export default class Kanban extends View {
           return;
         }
 
-        this.rememberRecent(detected.backlogDir);
+        this.rememberRecent(detected.backlogDir, ctx.on);
         const epicFiles = (detected.files ?? []).filter(isEpicFilename).sort();
         const loaded = [];
+        let readErrors = 0;
         const batchSize = 12;
         for (let i = 0; i < epicFiles.length; i += batchSize) {
           const batch = epicFiles.slice(i, i + batchSize);
           const results = await Promise.all(
             batch.map(async (name) => {
               const fullPath = joinPath(detected.backlogDir, name);
-              const text = await readTextFile(fullPath, { on: ctx.on }).catch(() => null);
+              const text = await readTextFile(fullPath, { on: ctx.on }).catch(() => {
+                readErrors++;
+                return null;
+              });
               if (text === null) return null;
               return parseEpicFile(name, text, fullPath);
             }),
@@ -453,7 +586,10 @@ export default class Kanban extends View {
         if (this.contextKey !== expectedKey) return;
         loaded.sort((a, b) => a.number - b.number || a.filename.localeCompare(b.filename));
         this.epics = loaded;
-        this.error = null;
+        this.error =
+          epicFiles.length > 0 && loaded.length === 0 && readErrors > 0
+            ? `Не удалось прочитать .md файлы в ${detected.backlogDir}`
+            : null;
 
         if (this.selectedEpicFile && !loaded.some((e) => e.filePath === this.selectedEpicFile)) {
           this.selectedEpicFile = null;
@@ -481,12 +617,12 @@ export default class Kanban extends View {
     });
   }
 
-  rememberRecent(dir) {
+  rememberRecent(dir, on = this.on) {
     const clean = normPath(dir);
     if (!clean) return;
     const sharedCurrent = shared(STORAGE_RECENT);
     const base = Array.isArray(sharedCurrent) ? sharedCurrent : this.recentFolders;
-    const next = [clean, ...base.filter((d) => d !== clean)].slice(0, 8);
+    const next = addRecentEntry(base, clean, on ?? null, 16);
     if (
       !Array.isArray(sharedCurrent) ||
       JSON.stringify(next) !== JSON.stringify(sharedCurrent) ||
@@ -509,13 +645,19 @@ export default class Kanban extends View {
         : this.spaceFolders;
     this.spaceFolders = { ...base, [ctx.spaceKey]: clean };
     setShared(STORAGE_FOLDERS, this.spaceFolders);
-    this.rememberRecent(clean);
+    this.rememberRecent(clean, ctx.on);
+    this.folderPickerOpen = false;
+    this.remoteBrowseError = null;
     this.selectedEpicFile = null;
     this.selectedTaskLine = null;
     this.refresh(cx, true);
   }
 
   chooseFolder(cx) {
+    if (this.on) {
+      this.openRemoteFolderPicker(cx);
+      return;
+    }
     cx.spawn(async (cx) => {
       const picked = await pickFolder({ prompt: "Выбрать папку backlog" });
       if (!picked) return;
@@ -532,6 +674,137 @@ export default class Kanban extends View {
         }
       }
       this.selectFolder(clean, cx);
+    });
+  }
+
+  openRemoteFolderPicker(cx) {
+    const ctx = this.resolveContext();
+    const startDir =
+      (this.backlogDir ? parentDir(this.backlogDir) : null) ||
+      this.projectRoot ||
+      ctx.paneCwd ||
+      "~";
+    this.folderPickerOpen = true;
+    this.remoteBrowseError = null;
+    this.remoteBrowseDirs = [];
+    this.remoteBrowseMdFiles = [];
+    this.remoteBrowseDir = normPath(startDir) || "~";
+    this.remotePathInput.set_value(this.remoteBrowseDir);
+    this.remotePathInput.focus();
+    cx.notify();
+    this.browseRemoteDir(startDir, cx);
+  }
+
+  closeFolderPicker(cx) {
+    this.folderPickerOpen = false;
+    this.remoteBrowseError = null;
+    this.remotePathFocused = false;
+    this.handle.focus();
+    cx.notify();
+  }
+
+  browseRemoteDir(dir, cx) {
+    const expectedOn = this.on;
+    const reqId = ++this.remoteBrowseSeq;
+    this.remoteBrowseLoading = true;
+    this.remoteBrowseError = null;
+    cx.notify();
+
+    cx.spawn(async (cx) => {
+      try {
+        const listing = await listRemoteDirectory(dir, expectedOn);
+        if (this.on !== expectedOn || this.remoteBrowseSeq !== reqId) return;
+        this.remoteBrowseDir = listing.dir;
+        this.remoteBrowseDirs = listing.dirs;
+        this.remoteBrowseMdFiles = listing.mdFiles;
+        this.remoteBrowseError = null;
+        this.remotePathInput.set_value(listing.dir);
+      } catch (e) {
+        if (this.on !== expectedOn || this.remoteBrowseSeq !== reqId) return;
+        this.remoteBrowseError = String(e?.message ?? e);
+      } finally {
+        if (this.on === expectedOn && this.remoteBrowseSeq === reqId) {
+          this.remoteBrowseLoading = false;
+          cx.notify();
+        }
+      }
+    });
+  }
+
+  submitRemotePath(cx) {
+    const raw = this.remotePathInput.value().trim();
+    if (!raw) return;
+    const expectedOn = this.on;
+    const reqId = ++this.remoteBrowseSeq;
+    this.remoteBrowseLoading = true;
+    this.remoteBrowseError = null;
+    cx.notify();
+
+    cx.spawn(async (cx) => {
+      try {
+        const resolved = await resolvePath(raw, expectedOn);
+        if (this.on !== expectedOn || this.remoteBrowseSeq !== reqId) return;
+        const listing = await listRemoteDirectory(resolved, expectedOn);
+        if (this.on !== expectedOn || this.remoteBrowseSeq !== reqId) return;
+
+        const hasDirectEpics = listing.mdFiles.some(isEpicFilename);
+        if (hasDirectEpics) {
+          this.selectFolder(listing.dir, cx);
+          return;
+        }
+
+        for (const subName of ["backlog", "docs/backlog", ".backlog"]) {
+          const sub = joinPath(listing.dir, subName);
+          const subFiles = await listMarkdownFiles(sub, expectedOn);
+          if (this.on !== expectedOn || this.remoteBrowseSeq !== reqId) return;
+          if (subFiles?.some(isEpicFilename)) {
+            this.selectFolder(sub, cx);
+            return;
+          }
+        }
+
+        this.remoteBrowseDir = listing.dir;
+        this.remoteBrowseDirs = listing.dirs;
+        this.remoteBrowseMdFiles = listing.mdFiles;
+        this.remoteBrowseError = null;
+        this.remotePathInput.set_value(listing.dir);
+      } catch (e) {
+        if (this.on !== expectedOn || this.remoteBrowseSeq !== reqId) return;
+        this.remoteBrowseError = String(e?.message ?? e);
+      } finally {
+        if (this.on === expectedOn && this.remoteBrowseSeq === reqId) {
+          this.remoteBrowseLoading = false;
+          cx.notify();
+        }
+      }
+    });
+  }
+
+  confirmRemoteFolder(dir, cx) {
+    const target = normPath(dir || this.remoteBrowseDir);
+    if (!target) return;
+    const expectedOn = this.on;
+    cx.spawn(async (cx) => {
+      const resolved = (await resolvePath(target, expectedOn)) || target;
+      if (this.on !== expectedOn) return;
+      const directFiles = await listMarkdownFiles(resolved, expectedOn);
+      if (directFiles === null) {
+        this.remoteBrowseError = `Папка не найдена: ${resolved}`;
+        cx.notify();
+        return;
+      }
+      const hasDirectEpics = directFiles.some(isEpicFilename);
+      if (!hasDirectEpics) {
+        for (const subName of ["backlog", "docs/backlog", ".backlog"]) {
+          const sub = joinPath(resolved, subName);
+          const subFiles = await listMarkdownFiles(sub, expectedOn);
+          if (subFiles !== null && (subFiles.some(isEpicFilename) || subName === "backlog")) {
+            this.selectFolder(sub, cx);
+            return;
+          }
+        }
+      }
+      this.selectFolder(resolved, cx);
     });
   }
 
@@ -947,6 +1220,14 @@ export default class Kanban extends View {
   }
 
   onKeyDown(e, cx) {
+    if (this.folderPickerOpen || this.remotePathFocused) {
+      if (e.key === "escape") {
+        this.closeFolderPicker(cx);
+        cx.stop_propagation();
+      }
+      return;
+    }
+
     if (this.searchFocused || this.newTaskFocused || this.creatingEpic) {
       if (e.key === "escape") {
         if (this.creatingEpic) this.creatingEpic = false;
@@ -1049,6 +1330,7 @@ export default class Kanban extends View {
               .when(Boolean(selected), (b) => b.child(renderDetail(this, selected, t, narrow))),
           ),
       )
-      .when(Boolean(this.contextMenu), (el) => el.child(renderContextMenu(this, t)));
+      .when(Boolean(this.contextMenu), (el) => el.child(renderContextMenu(this, t)))
+      .when(this.folderPickerOpen, (el) => el.child(renderRemoteFolderPicker(this, t)));
   }
 }
