@@ -1,0 +1,6 @@
+mods/kanban/gpui-kit.d.ts
+mods/kanban/jsconfig.json
+herdr-shot.png
+*.png
+!preview.png
+node_modules/

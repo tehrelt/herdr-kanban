@@ -1,0 +1,10 @@
+{
+  "global": {
+    "alt-b": { "command": "tab.new", "args": { "name": "Kanban", "mod": "kanban" } },
+    "alt-shift-b": { "command": "pane.split", "args": { "direction": "right", "mod": "kanban" } }
+  },
+  "mod:kanban": {
+    "ctrl-r": "kanban.refresh",
+    "ctrl-n": "kanban.new-epic"
+  }
+}
