@@ -1,6 +1,6 @@
 import { div, svg } from "gpui-kit";
-import { v_flex, h_flex, Input, Scrollbar } from "gpui-base";
-import { COLUMNS, PRIORITIES, isEpicFilename } from "./parser.js";
+import { v_flex, h_flex, Input, Textarea, Scrollbar } from "gpui-base";
+import { COLUMNS, PRIORITIES, isEpicFilename, nextEpicNumber } from "./parser.js";
 import { filterRecentForMachine, joinPath, parentDir } from "./paths.js";
 import {
   alpha,
@@ -205,122 +205,312 @@ export function renderToolbar(view, t) {
     );
 }
 
-export function renderNewEpicBar(view, t) {
-  return v_flex()
-    .id("kb-new-epic-bar")
-    .flex_none()
-    .px(14)
-    .py(10)
-    .gap(8)
-    .bg(t.surface)
-    .border_b(1)
-    .border_color(t.border)
-    .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+export function renderNewEpicModal(view, t) {
+  const isAgent = view.newEpicMode === "agent";
+  const agentsList = view.getAgentChoices();
+  const activeAgent = view.getSelectedAgent(agentsList);
+  const nextNum = nextEpicNumber(view.epics);
+  const nextId = `EPIC-${String(nextNum).padStart(3, "0")}`;
+  const modalW = Math.min(580, Math.max(340, (view.size?.width ?? 800) - 48));
+
+  return div()
+    .id("kb-new-epic-backdrop")
+    .absolute()
+    .inset_0()
+    .flex()
+    .items_center()
+    .justify_center()
+    .bg(alpha(t.canvas ?? t.background, "cc"))
+    .on_mouse_down("left", (_e, cx) => {
+      cx.stop_propagation();
+      view.toggleCreateEpic(cx, false);
+    })
     .child(
-      h_flex()
-        .gap(8)
-        .items_center()
-        .child(div().text_size(12).font_semibold().text_color(t.foreground).child("Новый эпик"))
+      v_flex()
+        .id("kb-new-epic-modal")
+        .w(modalW)
+        .rounded(12)
+        .border_1()
+        .border_color(t.border)
+        .bg(t.surface)
+        .overflow_hidden()
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .child(
           h_flex()
-            .gap(4)
+            .h(44)
+            .flex_none()
+            .px(14)
+            .gap(8)
             .items_center()
-            .children(
-              PRIORITIES.map((p) =>
-                pillButton(
-                  `kb-new-prio-${p}`,
-                  p,
-                  view.newEpicPriority === p,
-                  (_e, cx) => {
-                    view.newEpicPriority = p;
-                    cx.notify();
-                  },
-                  t,
-                  {
-                    px: 7,
-                    height: 22,
-                    textSize: 11,
-                    activeFg: priorityColor(t, p),
-                    activeBg: alpha(priorityColor(t, p), "22"),
-                    activeBorder: alpha(priorityColor(t, p), "66"),
-                  },
+            .bg(t.chrome)
+            .border_b(1)
+            .border_color(t.border)
+            .child(svg("mods/kanban/icons/plus.svg").size(14).flex_none().text_color(t.accent))
+            .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child("Новый эпик"))
+            .child(
+              h_flex()
+                .gap(4)
+                .items_center()
+                .child(
+                  pillButton(
+                    "kb-new-mode-manual",
+                    "Вручную",
+                    !isAgent,
+                    (_e, cx) => view.setNewEpicMode("manual", cx),
+                    t,
+                    { height: 24, px: 9, textSize: 11.5 },
+                  ),
+                )
+                .child(
+                  pillButton(
+                    "kb-new-mode-agent",
+                    "С агентом",
+                    isAgent,
+                    (_e, cx) => view.setNewEpicMode("agent", cx),
+                    t,
+                    { height: 24, px: 9, textSize: 11.5 },
+                  ),
                 ),
+            )
+            .child(div().flex_1())
+            .child(
+              iconButton(
+                "kb-new-epic-close",
+                "x",
+                "Закрыть (Esc)",
+                (_e, cx) => view.toggleCreateEpic(cx, false),
+                t,
+                { size: 24, iconSize: 13 },
               ),
             ),
         )
-        .child(div().flex_1())
-        .child(
-          div()
-            .text_size(11)
-            .text_color(t.dim)
-            .child("Enter — создать · Esc — отмена"),
-        ),
-    )
-    .child(
-      h_flex()
-        .flex_wrap()
-        .gap(8)
-        .items_center()
-        .child(
-          div()
-            .flex_1()
-            .min_w(220)
-            .h(30)
-            .px(9)
-            .flex()
-            .items_center()
-            .rounded(6)
-            .border_1()
-            .border_color(t.input)
-            .bg(t.background)
-            .child(Input.new(view.newEpicTitleInput).w_full().h_full().text_size(12.5).text_color(t.foreground)),
+        .when(!isAgent, (el) =>
+          el.child(
+            v_flex()
+              .p(14)
+              .gap(12)
+              .child(
+                h_flex()
+                  .gap(8)
+                  .items_center()
+                  .child(div().text_size(11.5).font_medium().text_color(t.muted).child("Приоритет"))
+                  .child(
+                    h_flex()
+                      .gap(4)
+                      .items_center()
+                      .children(
+                        PRIORITIES.map((p) =>
+                          pillButton(
+                            `kb-new-prio-${p}`,
+                            p,
+                            view.newEpicPriority === p,
+                            (_e, cx) => {
+                              view.newEpicPriority = p;
+                              cx.notify();
+                            },
+                            t,
+                            {
+                              px: 8,
+                              height: 24,
+                              textSize: 11,
+                              activeFg: priorityColor(t, p),
+                              activeBg: alpha(priorityColor(t, p), "22"),
+                              activeBorder: alpha(priorityColor(t, p), "66"),
+                            },
+                          ),
+                        ),
+                      ),
+                  ),
+              )
+              .child(
+                v_flex()
+                  .gap(5)
+                  .child(div().text_size(11.5).font_medium().text_color(t.muted).child("Название эпика"))
+                  .child(
+                    div()
+                      .w_full()
+                      .h(32)
+                      .px(10)
+                      .flex()
+                      .items_center()
+                      .rounded(7)
+                      .border_1()
+                      .border_color(view.newEpicTitleFocused ? t.accent : t.input)
+                      .bg(t.background)
+                      .child(Input.new(view.newEpicTitleInput).w_full().h_full().text_size(12.5).text_color(t.foreground)),
+                  ),
+              )
+              .child(
+                v_flex()
+                  .gap(5)
+                  .child(div().text_size(11.5).font_medium().text_color(t.muted).child("Первая задача (необязательно)"))
+                  .child(
+                    div()
+                      .w_full()
+                      .h(32)
+                      .px(10)
+                      .flex()
+                      .items_center()
+                      .rounded(7)
+                      .border_1()
+                      .border_color(view.newEpicTaskFocused ? t.accent : t.input)
+                      .bg(t.background)
+                      .child(Input.new(view.newEpicTaskInput).w_full().h_full().text_size(12.5).text_color(t.foreground)),
+                  ),
+              ),
+          ),
         )
-        .child(
-          div()
-            .flex_1()
-            .min_w(200)
-            .h(30)
-            .px(9)
-            .flex()
-            .items_center()
-            .rounded(6)
-            .border_1()
-            .border_color(t.input)
-            .bg(t.background)
-            .child(Input.new(view.newEpicTaskInput).w_full().h_full().text_size(12.5).text_color(t.foreground)),
+        .when(isAgent, (el) =>
+          el.child(
+            v_flex()
+              .p(14)
+              .gap(10)
+              .child(
+                h_flex()
+                  .gap(6)
+                  .items_center()
+                  .child(
+                    div()
+                      .flex_1()
+                      .min_w(0)
+                      .truncate()
+                      .text_size(11.5)
+                      .text_color(t.muted)
+                      .child(`Агент создаст .md файлы в ${view.backlogDir || "backlog/"} начиная с ${nextId}`),
+                  ),
+              )
+              .child(
+                div()
+                  .w_full()
+                  .p(8)
+                  .rounded(8)
+                  .border_1()
+                  .border_color(view.newEpicPromptFocused ? t.accent : t.input)
+                  .bg(t.background)
+                  .child(
+                    Textarea.new(view.newEpicPromptInput)
+                      .w_full()
+                      .h(200)
+                      .text_size(12.5)
+                      .text_color(t.foreground),
+                  ),
+              )
+              .when(view.newEpicAgentPickerOpen && agentsList.length > 0, (p) =>
+                p.child(
+                  h_flex()
+                    .flex_wrap()
+                    .gap(4)
+                    .pt(2)
+                    .children(
+                      agentsList.map((ag) =>
+                        pillButton(
+                          `kb-new-ag-${ag.key}`,
+                          ag.installed ? ag.name : `${ag.name} (?)`,
+                          activeAgent?.key === ag.key,
+                          (_e, cx) => view.selectAgent(ag.key, cx),
+                          t,
+                          { height: 24, px: 8, textSize: 11 },
+                        ),
+                      ),
+                    ),
+                ),
+              ),
+          ),
         )
         .child(
           h_flex()
-            .id("kb-create-epic-submit")
-            .h(30)
-            .px(12)
+            .h(48)
+            .flex_none()
+            .px(14)
+            .gap(8)
             .items_center()
-            .rounded(6)
-            .bg(t.solid)
-            .text_color(t.solid_foreground)
-            .text_size(12)
-            .font_medium()
-            .cursor_pointer()
-            .hover((s) => s.opacity(0.88))
-            .on_click((_e, cx) => view.submitNewEpic(cx))
-            .child("Создать"),
-        )
-        .child(
-          h_flex()
-            .id("kb-create-epic-cancel")
-            .h(30)
-            .px(10)
-            .items_center()
-            .rounded(6)
-            .border_1()
+            .bg(t.chrome)
+            .border_t(1)
             .border_color(t.border)
-            .bg(t.raised)
-            .text_color(t.muted)
-            .text_size(12)
-            .cursor_pointer()
-            .hover((s) => s.bg(t.hover).text_color(t.foreground))
-            .on_click((_e, cx) => view.toggleCreateEpic(cx, false))
-            .child("Отмена"),
+            .child(
+              div()
+                .flex_1()
+                .min_w(0)
+                .truncate()
+                .text_size(11)
+                .text_color(t.dim)
+                .child(isAgent ? "Откроет новую вкладку с агентом" : "Enter — создать · Esc — отмена"),
+            )
+            .child(
+              h_flex()
+                .id("kb-create-epic-cancel")
+                .h(30)
+                .px(12)
+                .items_center()
+                .rounded(6)
+                .border_1()
+                .border_color(t.border)
+                .bg(t.raised)
+                .text_color(t.muted)
+                .text_size(12)
+                .cursor_pointer()
+                .hover((s) => s.bg(t.hover).text_color(t.foreground))
+                .on_click((_e, cx) => view.toggleCreateEpic(cx, false))
+                .child("Отмена"),
+            )
+            .when(!isAgent, (el) =>
+              el.child(
+                h_flex()
+                  .id("kb-create-epic-submit")
+                  .h(30)
+                  .px(14)
+                  .items_center()
+                  .rounded(6)
+                  .bg(t.solid)
+                  .text_color(t.solid_foreground)
+                  .text_size(12)
+                  .font_medium()
+                  .cursor_pointer()
+                  .hover((s) => s.opacity(0.88))
+                  .on_click((_e, cx) => view.submitNewEpic(cx))
+                  .child("Создать"),
+              ),
+            )
+            .when(isAgent, (el) =>
+              el.child(
+                h_flex()
+                  .gap(2)
+                  .items_center()
+                  .child(
+                    h_flex()
+                      .id("kb-create-agent-submit")
+                      .h(30)
+                      .px(12)
+                      .gap(6)
+                      .items_center()
+                      .rounded(6)
+                      .bg(t.solid)
+                      .text_color(t.solid_foreground)
+                      .text_size(12)
+                      .font_medium()
+                      .cursor_pointer()
+                      .hover((s) => s.opacity(0.88))
+                      .on_click((_e, cx) => view.submitAgentEpics(cx))
+                      .child(svg("mods/kanban/icons/play.svg").size(12).flex_none())
+                      .child(activeAgent ? `Создать задачи (${activeAgent.name})` : "Создать задачи"),
+                  )
+                  .when(agentsList.length > 1, (b) =>
+                    b.child(
+                      iconButton(
+                        "kb-new-agent-pick",
+                        view.newEpicAgentPickerOpen ? "chevron-down" : "chevron-right",
+                        "Выбрать агента",
+                        (_e, cx) => {
+                          view.newEpicAgentPickerOpen = !view.newEpicAgentPickerOpen;
+                          cx.notify();
+                        },
+                        t,
+                        { size: 30, iconSize: 13 },
+                      ),
+                    ),
+                  ),
+              ),
+            ),
         ),
     );
 }

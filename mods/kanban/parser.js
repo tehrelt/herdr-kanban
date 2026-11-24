@@ -559,3 +559,61 @@ export function buildAgentPrompt(epic, task = null, projectRoot = null) {
   lines.push("После выполнения обнови статус задачи/эпика в файле бэклога.");
   return lines.join("\n");
 }
+
+export function nextEpicNumber(epics = []) {
+  const maxNum = (epics ?? []).reduce((m, e) => (e.number < 9000 ? Math.max(m, e.number) : m), 0);
+  return maxNum + 1;
+}
+
+export function buildCreateEpicsPrompt({
+  description,
+  backlogDir,
+  nextNumber = 1,
+  projectRoot = null,
+  project = null,
+}) {
+  const pad = String(nextNumber).padStart(3, "0");
+  const lines = [
+    "Создай один или несколько файлов эпиков в бэклоге проекта по следующему описанию:",
+    "",
+    String(description ?? "").trim(),
+    "",
+    `Папка бэклога: ${backlogDir}`,
+    `Начни нумерацию с EPIC-${pad} (имя файла вида ${pad}-<slug>.md).`,
+  ];
+  if (projectRoot) {
+    lines.push(`Корень проекта: ${projectRoot}`);
+  }
+  if (project && String(project).trim()) {
+    lines.push(`Проект: ${String(project).trim()} (укажи \`> Проект: **${String(project).trim()}**\`).`);
+  }
+  lines.push(
+    "",
+    "Формат каждого файла эпика:",
+    "```markdown",
+    `# EPIC-${pad} — Название эпика`,
+    "",
+    "**Status:** [ ] TODO",
+    "",
+    "**Priority:** P1",
+    "",
+    "## Цель",
+    "",
+    "Краткое описание цели эпика.",
+    "",
+    "## Задачи",
+    "",
+    `- [ ] TASK-${pad}.1 Первая задача`,
+    "  - Подпункт или уточнение (при необходимости)",
+    "",
+    "## Definition of Done",
+    "",
+    "- Критерий готовности.",
+    "",
+    "---",
+    "```",
+    "",
+    "Допустимые приоритеты: P0, P1, P2, P3. Если задач несколько и они относятся к разным темам, разбей их на отдельные файлы эпиков с последовательными номерами.",
+  );
+  return lines.join("\n");
+}

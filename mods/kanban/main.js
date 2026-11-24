@@ -1,5 +1,5 @@
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, InputState } from "gpui-base";
+import { v_flex, h_flex, InputState, TextareaState } from "gpui-base";
 import {
   spaces,
   panes,
@@ -46,10 +46,12 @@ import {
   createEpicMarkdown,
   slugifyEpicFilename,
   buildAgentPrompt,
+  nextEpicNumber,
+  buildCreateEpicsPrompt,
 } from "./parser.js";
 import {
   renderToolbar,
-  renderNewEpicBar,
+  renderNewEpicModal,
   renderLoadingState,
   renderEmptyState,
   renderBoard,
@@ -269,7 +271,9 @@ export default class Kanban extends View {
     this.contextMenu = null;
 
     this.creatingEpic = false;
+    this.newEpicMode = "manual";
     this.newEpicPriority = "P1";
+    this.newEpicAgentPickerOpen = false;
     this.agentPickerOpen = false;
     this.knownAgentsList = [];
     this.extraInstalledKeys = new Set();
@@ -351,6 +355,20 @@ export default class Kanban extends View {
     });
     this.newEpicTaskInput.on("blur", (_e, cx) => {
       this.newEpicTaskFocused = false;
+      cx.notify();
+    });
+
+    this.newEpicPromptFocused = false;
+    this.newEpicPromptInput = TextareaState.new({
+      placeholder: "Опишите задачу или список задач — агент разобьёт их на эпики и создаст .md файлы в backlog/…",
+      rows: 8,
+    });
+    this.newEpicPromptInput.on("focus", (_e, cx) => {
+      this.newEpicPromptFocused = true;
+      cx.notify();
+    });
+    this.newEpicPromptInput.on("blur", (_e, cx) => {
+      this.newEpicPromptFocused = false;
       cx.notify();
     });
 
@@ -530,8 +548,13 @@ export default class Kanban extends View {
     const contextChanged = ctx.key !== this.contextKey;
     if (contextChanged) {
       this.contextKey = ctx.key;
+      if (this.on !== ctx.on) {
+        this.knownAgentsList = [];
+        this.extraInstalledKeys = new Set();
+      }
       this.on = ctx.on;
       this.readOnly = Boolean(ctx.on);
+      if (this.creatingEpic) this.toggleCreateEpic(cx, false);
       this.selectedEpicFile = null;
       this.selectedTaskLine = null;
       this.contextMenu = null;
@@ -808,26 +831,25 @@ export default class Kanban extends View {
     });
   }
 
+  runningAgentKeys(on) {
+    const spaceIds = new Set(spaces().filter((s) => s.machine === on).map((s) => s.id));
+    return new Set(agents().filter((a) => spaceIds.has(a.space)).map((a) => a.program?.key).filter(Boolean));
+  }
+
   loadAgents(cx) {
     const on = this.on;
     cx.spawn(async (cx) => {
-      try {
-        const list = await knownAgents({ on });
-        this.knownAgentsList = Array.isArray(list) ? list : [];
-      } catch {
-        this.knownAgentsList = [];
-      }
+      const result = await knownAgents({ on }).catch(() => []);
+      if (this.on !== on) return;
+      const list = Array.isArray(result) ? result : [];
+      const extra = new Set();
 
       // Fallback check on local Windows/Unix if knownAgents reported none installed.
-      const anyInstalled = this.knownAgentsList.some((a) => a.installed);
-      if (!anyInstalled && !on) {
-        const extra = new Set();
-        for (const a of agents()) {
-          if (a.program?.key) extra.add(a.program.key);
-        }
+      if (!on && !list.some((a) => a.installed)) {
+        const runningKeys = this.runningAgentKeys(on);
         const probeCmd = window()?.platform === "windows" ? "where.exe" : "which";
-        const candidates = this.knownAgentsList.length
-          ? this.knownAgentsList
+        const candidates = list.length
+          ? list
           : [
               { key: "opencode", name: "OpenCode", run: ["opencode"] },
               { key: "claude", name: "Claude Code", run: ["claude"] },
@@ -836,19 +858,21 @@ export default class Kanban extends View {
         await Promise.all(
           candidates.slice(0, 10).map(async (ag) => {
             const bin = ag.run?.[0];
-            if (!bin || extra.has(ag.key)) return;
+            if (!bin || runningKeys.has(ag.key)) return;
             const r = await exec(probeCmd, [bin]).catch(() => null);
             if (r?.code === 0) extra.add(ag.key);
           }),
         );
-        this.extraInstalledKeys = extra;
       }
+      if (this.on !== on) return;
+      this.knownAgentsList = list;
+      this.extraInstalledKeys = extra;
       cx.notify();
     });
   }
 
   getAgentChoices() {
-    const runningKeys = new Set(agents().map((a) => a.program?.key).filter(Boolean));
+    const runningKeys = this.runningAgentKeys(this.on);
     const base = this.knownAgentsList.length
       ? this.knownAgentsList
       : [
@@ -872,6 +896,7 @@ export default class Kanban extends View {
   selectAgent(key, cx) {
     this.selectedAgentKey = key;
     this.agentPickerOpen = false;
+    this.newEpicAgentPickerOpen = false;
     setShared(STORAGE_AGENT, key);
     cx.notify();
   }
@@ -1167,13 +1192,32 @@ export default class Kanban extends View {
   }
 
   toggleCreateEpic(cx, forceState = null) {
-    this.creatingEpic = forceState !== null ? forceState : !this.creatingEpic;
+    const opening = forceState ?? !this.creatingEpic;
+    if (opening && (this.readOnly || !this.backlogDir || this.loading)) return;
+    this.creatingEpic = opening;
+    this.newEpicAgentPickerOpen = false;
     if (this.creatingEpic) {
       this.newEpicTitleInput.set_value("");
       this.newEpicTaskInput.set_value("");
-      this.newEpicTitleInput.focus();
+      this.newEpicPromptInput.set_value("");
+      if (this.newEpicMode === "agent") {
+        this.newEpicPromptInput.focus();
+      } else {
+        this.newEpicTitleInput.focus();
+      }
     } else {
       this.handle.focus();
+    }
+    cx.notify();
+  }
+
+  setNewEpicMode(mode, cx) {
+    this.newEpicMode = mode === "agent" ? "agent" : "manual";
+    this.newEpicAgentPickerOpen = false;
+    if (this.newEpicMode === "agent") {
+      this.newEpicPromptInput.focus();
+    } else {
+      this.newEpicTitleInput.focus();
     }
     cx.notify();
   }
@@ -1186,8 +1230,7 @@ export default class Kanban extends View {
       return;
     }
     const firstTask = this.newEpicTaskInput.value().trim();
-    const maxNum = this.epics.reduce((m, e) => (e.number < 9000 ? Math.max(m, e.number) : m), 0);
-    const nextNum = maxNum + 1;
+    const nextNum = nextEpicNumber(this.epics);
     const filename = slugifyEpicFilename(nextNum, title);
     const fullPath = joinPath(this.backlogDir, filename);
     const project = this.epics.find((e) => e.project)?.project ?? "";
@@ -1219,6 +1262,58 @@ export default class Kanban extends View {
     });
   }
 
+  submitAgentEpics(cx) {
+    if (this.readOnly || !this.backlogDir) return;
+    const description = this.newEpicPromptInput.value().trim();
+    if (!description) {
+      notify({ title: "Опишите задачу для агента", level: "warning" });
+      return;
+    }
+
+    const project = this.epics.find((e) => e.project)?.project ?? "";
+    const prompt = buildCreateEpicsPrompt({
+      description,
+      backlogDir: this.backlogDir,
+      nextNumber: nextEpicNumber(this.epics),
+      projectRoot: this.projectRoot,
+      project,
+    });
+
+    const agent = this.getSelectedAgent();
+    if (!agent || !agent.installed) {
+      cx.write_to_clipboard(prompt);
+      notify({
+        title: "Агент не найден — промпт скопирован",
+        body: "Вставьте промпт в терминал с агентом",
+        level: "warning",
+      });
+      this.toggleCreateEpic(cx, false);
+      return;
+    }
+
+    const space = spaces().find((s) => s.active);
+    const folder = this.projectRoot || parentDir(this.backlogDir) || space?.folder;
+
+    run("tab.new", {
+      name: "Новые задачи",
+      ...(space?.id ? { space: space.id } : {}),
+      ...(folder ? { folder } : {}),
+      argv: agent.run,
+      task: prompt,
+    });
+
+    notify({
+      title: `Запущен ${agent.name}`,
+      body: "Создание задач в backlog/",
+      level: "success",
+    });
+
+    this.toggleCreateEpic(cx, false);
+    if (this.isOverlay()) {
+      this.closeSelf();
+    }
+  }
+
   onKeyDown(e, cx) {
     if (this.folderPickerOpen || this.remotePathFocused) {
       if (e.key === "escape") {
@@ -1230,7 +1325,17 @@ export default class Kanban extends View {
 
     if (this.searchFocused || this.newTaskFocused || this.creatingEpic) {
       if (e.key === "escape") {
-        if (this.creatingEpic) this.creatingEpic = false;
+        if (this.creatingEpic) {
+          if (this.newEpicAgentPickerOpen) {
+            this.newEpicAgentPickerOpen = false;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+          }
+          this.toggleCreateEpic(cx, false);
+          cx.stop_propagation();
+          return;
+        }
         this.searchFocused = false;
         this.newTaskFocused = false;
         this.handle.focus();
@@ -1315,7 +1420,6 @@ export default class Kanban extends View {
       .on_mouse_up("left", (_e, cx) => this.onRootMouseUp(cx))
       .on_mouse_down("right", (e, cx) => this.onRootRightMouseDown(e, cx))
       .child(renderToolbar(this, t))
-      .when(this.creatingEpic, (el) => el.child(renderNewEpicBar(this, t)))
       .child(
         h_flex()
           .w_full()
@@ -1331,6 +1435,7 @@ export default class Kanban extends View {
           ),
       )
       .when(Boolean(this.contextMenu), (el) => el.child(renderContextMenu(this, t)))
+      .when(this.creatingEpic, (el) => el.child(renderNewEpicModal(this, t)))
       .when(this.folderPickerOpen, (el) => el.child(renderRemoteFolderPicker(this, t)));
   }
 }

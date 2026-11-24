@@ -15,6 +15,8 @@ import {
   createEpicMarkdown,
   slugifyEpicFilename,
   buildAgentPrompt,
+  nextEpicNumber,
+  buildCreateEpicsPrompt,
 } from "../mods/kanban/parser.js";
 
 describe("isEpicFilename", () => {
@@ -263,6 +265,31 @@ describe("mutations preserve formatting and update markdown safely", () => {
     expect(prompt).toContain("EPIC-006");
     expect(prompt).toContain("C:/repo/backlog/006.md");
     expect(prompt).toContain("C:/repo");
+  });
+
+  test("nextEpicNumber returns max number < 9000 plus 1, or 1 when empty", () => {
+    expect(nextEpicNumber([])).toBe(1);
+    expect(nextEpicNumber([{ number: 9999 }])).toBe(1);
+    expect(nextEpicNumber([{ number: 1 }, { number: 5 }, { number: 9999 }])).toBe(6);
+  });
+
+  test("buildCreateEpicsPrompt includes description, backlogDir, next EPIC id, project, and format rules", () => {
+    const prompt = buildCreateEpicsPrompt({
+      description: "Добавить OAuth и страницу профиля",
+      backlogDir: "C:/repo/backlog",
+      nextNumber: 7,
+      projectRoot: "C:/repo",
+      project: "Herdr",
+    });
+    expect(prompt).toContain("Добавить OAuth и страницу профиля");
+    expect(prompt).toContain("C:/repo/backlog");
+    expect(prompt).toContain("EPIC-007");
+    expect(prompt).toContain("007-");
+    expect(prompt).toContain("C:/repo");
+    expect(prompt).toContain("Herdr");
+    expect(prompt).toContain("**Status:** [ ] TODO");
+    expect(prompt).toContain("**Priority:**");
+    expect(prompt).toContain("## Задачи");
   });
 });
 
