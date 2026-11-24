@@ -13,6 +13,8 @@ import {
   addTaskToEpic,
   addTaskAndSyncEpic,
   createEpicMarkdown,
+  createBacklogGuideMarkdown,
+  createStarterEpicMarkdown,
   slugifyEpicFilename,
   buildAgentPrompt,
   nextEpicNumber,
@@ -265,6 +267,24 @@ describe("mutations preserve formatting and update markdown safely", () => {
     expect(prompt).toContain("EPIC-006");
     expect(prompt).toContain("C:/repo/backlog/006.md");
     expect(prompt).toContain("C:/repo");
+  });
+
+  test("createBacklogGuideMarkdown and createStarterEpicMarkdown produce valid guide and starter epic", () => {
+    const guide = createBacklogGuideMarkdown();
+    expect(isEpicFilename("README.md")).toBe(false);
+    expect(guide).toContain("backlog/");
+    expect(guide).toContain("**Status:**");
+    expect(guide).toContain("**Priority:**");
+    expect(guide).toContain("Definition of Done");
+
+    const starter = createStarterEpicMarkdown();
+    const parsed = parseEpicFile("001-getting-started.md", starter);
+    expect(parsed.id).toBe("EPIC-001");
+    expect(parsed.status).toBe("todo");
+    expect(parsed.priority).toBe("P2");
+    expect(parsed.tasks.length).toBeGreaterThanOrEqual(3);
+    expect(parsed.goal).toContain("README.md");
+    expect(parsed.dod.length).toBeGreaterThan(0);
   });
 
   test("nextEpicNumber returns max number < 9000 plus 1, or 1 when empty", () => {

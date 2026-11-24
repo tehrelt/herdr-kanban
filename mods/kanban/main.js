@@ -30,6 +30,7 @@ import {
   normPath,
   joinPath,
   parentDir,
+  resolveInitTargetDir,
   expandTilde,
   parseRemoteDirOutput,
   normalizeRecentEntries,
@@ -44,6 +45,8 @@ import {
   updateTaskStatus,
   addTaskAndSyncEpic,
   createEpicMarkdown,
+  createBacklogGuideMarkdown,
+  createStarterEpicMarkdown,
   slugifyEpicFilename,
   buildAgentPrompt,
   nextEpicNumber,
@@ -161,6 +164,23 @@ async function listMarkdownFiles(dir, on) {
     }
     return null;
   }
+}
+
+async function ensureLocalDir(dir) {
+  const cleanDir = await resolvePath(dir, null);
+  if (!cleanDir) throw new Error("Некорректный путь к папке");
+  if (window()?.platform === "windows") {
+    const escaped = cleanDir.replace(/['‘’‚‛]/g, "$&$&");
+    const script =
+      "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); " +
+      `& { param($p) New-Item -ItemType Directory -Force -Path $p -ErrorAction Stop | Out-Null } '${escaped}'`;
+    const r = await exec("powershell", ["-NoProfile", "-Command", script]);
+    if (r.code !== 0) throw new Error(r.stderr?.trim() || `Не удалось создать папку: ${cleanDir}`);
+    return cleanDir;
+  }
+  const r = await exec("mkdir", ["-p", cleanDir]);
+  if (r.code !== 0) throw new Error(r.stderr?.trim() || `Не удалось создать папку: ${cleanDir}`);
+  return cleanDir;
 }
 
 async function listRemoteDirectory(dir, on) {
@@ -459,10 +479,13 @@ export default class Kanban extends View {
     const f = focused();
     const allPanes = panes();
     const spaceTabIds = new Set((space?.tabs ?? []).map((t) => t.id));
+    const propCwd = normPath(props()?.cwd);
     const paneCwd =
-      (f?.pane ? allPanes.find((p) => p.pane === f.pane)?.cwd : null) ||
-      (f?.space === space?.id ? f?.cwd : null) ||
+      (f?.space === space?.id
+        ? (f?.pane ? allPanes.find((p) => p.pane === f.pane)?.cwd : null) || f?.cwd
+        : null) ||
       (f?.tab && spaceTabIds.has(f.tab) ? allPanes.find((p) => p.tab === f.tab && p.cwd)?.cwd : null) ||
+      propCwd ||
       allPanes.find((p) => spaceTabIds.has(p.tab) && p.cwd)?.cwd ||
       space?.folder ||
       null;
@@ -697,6 +720,52 @@ export default class Kanban extends View {
         }
       }
       this.selectFolder(clean, cx);
+    });
+  }
+
+  initBacklogFolder(cx) {
+    if (this.readOnly || this.writing) return;
+    const baseDir = this.projectRoot;
+    this.writing = true;
+    cx.notify();
+
+    cx.spawn(async (cx) => {
+      try {
+        let targetBase = baseDir;
+        if (!targetBase) {
+          const picked = await pickFolder({ prompt: "Выбрать папку проекта для backlog" });
+          if (!picked) return;
+          targetBase = picked;
+        }
+        const targetDir = resolveInitTargetDir(targetBase);
+        if (!targetDir) throw new Error("Не удалось определить путь для папки backlog");
+
+        const cleanDir = await ensureLocalDir(targetDir);
+        const existingFiles = (await listMarkdownFiles(cleanDir, null)) ?? [];
+
+        const readmePath = joinPath(cleanDir, "README.md");
+        const existingReadme = await readTextFile(readmePath).catch(() => null);
+        if (existingReadme === null) {
+          await writeTextFile(readmePath, createBacklogGuideMarkdown(), null);
+        }
+
+        const hasEpics = existingFiles.some(isEpicFilename);
+        if (!hasEpics) {
+          const starterPath = joinPath(cleanDir, "001-getting-started.md");
+          const existingStarter = await readTextFile(starterPath).catch(() => null);
+          if (existingStarter === null) {
+            await writeTextFile(starterPath, createStarterEpicMarkdown(), null);
+          }
+        }
+
+        this.selectFolder(cleanDir, cx);
+        notify({ title: "Папка backlog инициализирована", body: cleanDir, level: "success" });
+      } catch (e) {
+        notify({ title: "Не удалось инициализировать backlog", body: String(e?.message ?? e), level: "error" });
+      } finally {
+        this.writing = false;
+        cx.notify();
+      }
     });
   }
 

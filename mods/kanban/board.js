@@ -1,7 +1,7 @@
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex, Input, Textarea, Scrollbar } from "gpui-base";
 import { COLUMNS, PRIORITIES, isEpicFilename, nextEpicNumber } from "./parser.js";
-import { filterRecentForMachine, joinPath, parentDir } from "./paths.js";
+import { filterRecentForMachine, joinPath, parentDir, resolveInitTargetDir } from "./paths.js";
 import {
   alpha,
   badge,
@@ -540,6 +540,7 @@ export function renderLoadingState(t) {
 
 export function renderEmptyState(view, t) {
   const recent = filterRecentForMachine(view.recentFolders, view.on);
+  const initTarget = resolveInitTargetDir(view.projectRoot);
   return v_flex()
     .flex_1()
     .h_full()
@@ -587,7 +588,9 @@ export function renderEmptyState(view, t) {
                   ? `В ${view.backlogDir} пока нет .md файлов эпиков. ${view.readOnly ? "Выберите другую папку." : "Создайте первый эпик или выберите другую папку."}`
                   : view.on
                     ? `Плагин автоматически ищет папку backlog/ на ${view.on}. Укажите путь или выберите папку на удалённой машине.`
-                    : "Плагин автоматически ищет папку backlog/ в активном space. Выберите папку с .md задачами вручную или откройте недавний проект.",
+                    : initTarget
+                      ? `Папка backlog/ не найдена в ${view.projectRoot}. Выберите существующую папку или инициализируйте ${initTarget} с руководством.`
+                      : "Плагин автоматически ищет папку backlog/ в активном space. Выберите папку с .md задачами вручную или инициализируйте новую.",
             ),
         )
         .child(
@@ -611,6 +614,32 @@ export function renderEmptyState(view, t) {
                 .on_click((_e, cx) => view.chooseFolder(cx))
                 .child(svg("mods/kanban/icons/folder.svg").size(14))
                 .child(view.on ? `Выбрать папку на ${view.on}…` : "Выбрать папку…"),
+            )
+            .when(!view.backlogDir && !view.readOnly, (el) =>
+              el.child(
+                h_flex()
+                  .id("kb-empty-init")
+                  .h(32)
+                  .px(12)
+                  .gap(6)
+                  .items_center()
+                  .rounded(8)
+                  .border_1()
+                  .border_color(t.border)
+                  .bg(t.raised)
+                  .text_color(t.foreground)
+                  .text_size(12.5)
+                  .cursor_pointer()
+                  .tooltip(
+                    initTarget
+                      ? `Создать ${initTarget} с руководством и стартовым эпиком`
+                      : "Выбрать папку проекта и создать backlog/ с руководством",
+                  )
+                  .hover((s) => s.bg(t.hover))
+                  .on_click((_e, cx) => view.initBacklogFolder(cx))
+                  .child(svg("mods/kanban/icons/plus.svg").size(13))
+                  .child("Инициализировать backlog"),
+              ),
             )
             .when(Boolean(view.backlogDir) && !view.readOnly, (el) =>
               el.child(

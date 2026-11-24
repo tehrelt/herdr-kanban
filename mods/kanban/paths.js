@@ -17,6 +17,14 @@ export function joinPath(dir, name) {
   return `${base}/${name}`;
 }
 
+export function resolveInitTargetDir(baseDir) {
+  const clean = normPath(baseDir);
+  if (!clean) return null;
+  const lower = clean.toLowerCase();
+  if (lower.endsWith("/backlog") || lower.endsWith("/.backlog")) return clean;
+  return joinPath(clean, "backlog");
+}
+
 export function parentDir(dir) {
   const p = normPath(dir);
   if (!p) return null;
