@@ -1,0 +1,12 @@
+{
+  "name": "herdr-kanban",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "mcp/backlog-server"
+  ],
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.0.0"
+  }
+}
