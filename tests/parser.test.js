@@ -13,8 +13,12 @@ import {
   addTaskToEpic,
   addTaskAndSyncEpic,
   createEpicMarkdown,
+  createBacklogGuideMarkdown,
+  createStarterEpicMarkdown,
   slugifyEpicFilename,
   buildAgentPrompt,
+  nextEpicNumber,
+  buildCreateEpicsPrompt,
 } from "../mods/kanban/parser.js";
 
 describe("isEpicFilename", () => {
@@ -263,6 +267,49 @@ describe("mutations preserve formatting and update markdown safely", () => {
     expect(prompt).toContain("EPIC-006");
     expect(prompt).toContain("C:/repo/backlog/006.md");
     expect(prompt).toContain("C:/repo");
+  });
+
+  test("createBacklogGuideMarkdown and createStarterEpicMarkdown produce valid guide and starter epic", () => {
+    const guide = createBacklogGuideMarkdown();
+    expect(isEpicFilename("README.md")).toBe(false);
+    expect(guide).toContain("backlog/");
+    expect(guide).toContain("**Status:**");
+    expect(guide).toContain("**Priority:**");
+    expect(guide).toContain("Definition of Done");
+
+    const starter = createStarterEpicMarkdown();
+    const parsed = parseEpicFile("001-getting-started.md", starter);
+    expect(parsed.id).toBe("EPIC-001");
+    expect(parsed.status).toBe("todo");
+    expect(parsed.priority).toBe("P2");
+    expect(parsed.tasks.length).toBeGreaterThanOrEqual(3);
+    expect(parsed.goal).toContain("README.md");
+    expect(parsed.dod.length).toBeGreaterThan(0);
+  });
+
+  test("nextEpicNumber returns max number < 9000 plus 1, or 1 when empty", () => {
+    expect(nextEpicNumber([])).toBe(1);
+    expect(nextEpicNumber([{ number: 9999 }])).toBe(1);
+    expect(nextEpicNumber([{ number: 1 }, { number: 5 }, { number: 9999 }])).toBe(6);
+  });
+
+  test("buildCreateEpicsPrompt includes description, backlogDir, next EPIC id, project, and format rules", () => {
+    const prompt = buildCreateEpicsPrompt({
+      description: "Добавить OAuth и страницу профиля",
+      backlogDir: "C:/repo/backlog",
+      nextNumber: 7,
+      projectRoot: "C:/repo",
+      project: "Herdr",
+    });
+    expect(prompt).toContain("Добавить OAuth и страницу профиля");
+    expect(prompt).toContain("C:/repo/backlog");
+    expect(prompt).toContain("EPIC-007");
+    expect(prompt).toContain("007-");
+    expect(prompt).toContain("C:/repo");
+    expect(prompt).toContain("Herdr");
+    expect(prompt).toContain("**Status:** [ ] TODO");
+    expect(prompt).toContain("**Priority:**");
+    expect(prompt).toContain("## Задачи");
   });
 });
 

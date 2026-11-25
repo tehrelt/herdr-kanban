@@ -3,6 +3,7 @@ import {
   normPath,
   joinPath,
   parentDir,
+  resolveInitTargetDir,
   expandTilde,
   parseRemoteDirOutput,
   normalizeRecentEntries,
@@ -42,6 +43,13 @@ describe("path helpers", () => {
     expect(expandTilde("~/repo/backlog", "/home/alice/")).toBe("/home/alice/repo/backlog");
     expect(expandTilde("/srv/app", "/home/alice")).toBe("/srv/app");
     expect(expandTilde("~/repo", null)).toBe("~/repo");
+  });
+
+  test("resolveInitTargetDir appends backlog unless already backlog/.backlog", () => {
+    expect(resolveInitTargetDir("C:\\repo\\app\\")).toBe("C:/repo/app/backlog");
+    expect(resolveInitTargetDir("/srv/app/backlog")).toBe("/srv/app/backlog");
+    expect(resolveInitTargetDir("/srv/app/.backlog/")).toBe("/srv/app/.backlog");
+    expect(resolveInitTargetDir(null)).toBeNull();
   });
 });
 
