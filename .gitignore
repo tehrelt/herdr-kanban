@@ -4,3 +4,4 @@ herdr-shot.png
 *.png
 !preview.png
 node_modules/
+.serena/
